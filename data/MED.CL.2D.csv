@@ -1,0 +1,7 @@
+PFAS,assay,expo,Med,LB,UB,Min,Max,Study,Type
+PFOS,2D cell culture,Single,0.001511553,0.001464977,0.001704522,-,-,New kidney model,In vitro
+PFOS,2D cell culture,Mixture,0.000183794,1.04E-04,0.000335555,-,-,New kidney model,In vitro
+PFBS,2D cell culture,Single,0.844371258,0.819323955,0.911247767,-,-,New kidney model,In vitro
+PFBS,2D cell culture,Mixture,0.703622342,0.699973956,0.720455811,-,-,New kidney model,In vitro
+PFHxA,2D cell culture,Single,0.58844425,0.545625863,0.629548776,-,-,New kidney model,In vitro
+PFHxA,2D cell culture,Mixture,0.662186632,0.644675629,0.689592386,-,-,New kidney model,In vitro
