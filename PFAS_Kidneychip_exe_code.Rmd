@@ -1,0 +1,956 @@
+---
+title: "PFAS_KidneyChip_exe_code"
+author: "Hsing-Chieh Lin"
+date: "2024-02-29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(rstan)
+library(tidyverse)
+library(ggplot2)
+library(scales)
+library(patchwork)
+library(plyr)
+library(ggridges)
+library(ggh4x)
+library(ggpattern)
+library(gridpattern)
+```
+
+
+```{r Set for MCsim}
+# Set for MCsim
+source("MCSim/function.R")
+set_PATH()
+makemod()
+```
+
+
+```{r Kunze et al. (2014) IVIVE results (Figure S1)}
+kunze_ivive_results <- read.csv("data/kunze_ivive_results.csv")
+kunze_ivive_results$PFAS <- factor(kunze_ivive_results$PFAS, levels = c("PFOS", "PFHxA", "PFBS"))
+kunze_ivive_results$assay <- factor(kunze_ivive_results$assay, levels = c("Static", "Fluidic"))
+kunze_ivive_results$expo <- factor(kunze_ivive_results$expo, levels = c("Single", "Mixture"))
+kunze_ivive_results$Time <- factor(kunze_ivive_results$Time)
+
+#Figure S1
+pdf(width = 8, height = 5.5, "plots/Figure S1.pdf")
+ggplot(data = kunze_ivive_results) +
+  geom_col(aes(x = Time, y=CLr_ml_day_kg, color = PFAS, fill = PFAS),width=0.6)+
+  scale_color_manual(values = c("#167CF2","#6FCC33","#F28E16"))+
+  scale_fill_manual(values = c("#167CF2","#6FCC33","#F28E16"))+
+  facet_nested(PFAS~assay+expo, nest_line = element_line(linetype = 1))+
+  theme_bw() + 
+  ylim(c(0, 60))+
+  xlab("Time (hour)") +
+  ylab("Renal clearance (ml/day/kg)")+
+  theme(text=element_text(family="sans", face="plain", color="#000000", size=12),
+        title = element_text(color = "black", size=12),
+        panel.grid = element_blank(),
+        panel.border = element_rect(size = 1.2),
+        ggh4x.facet.nestline = element_line(size = 0.7),
+        legend.position = "none",
+        strip.text.x = element_text(color = "black", face = "bold", size=12),
+        strip.text.y = element_text(color = "black", face = "bold", size=12, angle = 0),
+        strip.background = element_blank(),
+        axis.ticks = element_line(color = "black"),
+        axis.title = element_text(color = "black", size=12),
+        axis.text.y = element_text(color = "black", size=10),
+        axis.text.x = element_text(color = "black", size=10))
+dev.off()
+```
+
+
+```{r Model fitting: MCMC simulation}
+model <- "PFAS_kidneychip.model.R"
+makemcsim(model)
+
+che.list <- c("pfos", "pfbs", "pfhxa")
+che.lable <- c("PFOS", "PFBS", "PFHxA")
+
+for (i in 1:3){
+  
+  # ----- Transwell_single ----- 
+  file.name.1 <- paste(che.list[i], "_Transwell_single_mcmc_1.in.R", sep = "")
+  file.name.2 <- paste(che.list[i], "_Transwell_single_mcmc_2.in.R", sep = "")
+  file.name.3 <- paste(che.list[i], "_Transwell_single_mcmc_3.in.R", sep = "")
+  file.name.4 <- paste(che.list[i], "_Transwell_single_mcmc_4.in.R", sep = "")
+  out_1 <- mcsim(model, file.name.1)
+  out_2 <- mcsim(model, file.name.2)
+  out_3 <- mcsim(model, file.name.3)
+  out_4 <- mcsim(model, file.name.4)
+  
+  out_all <- rbind(out_1, out_2, out_3, out_4)
+  write.csv(out_all, paste("outputs/", che.list[i], "_Transwell_single_alliters.csv", sep = ""))
+  
+  R_hat.results <- monitor(mcmc_array(list(out_1, out_2, out_3, out_4)), digits = 4, warmup = 2000)
+  write.csv(R_hat.results, paste("outputs/", che.list[i], "_Transwell_single_R_hat.results.csv", sep = ""))
+  
+  str <- ceiling(nrow(out_1)/5) + 1
+  end <- nrow(out_1)
+  j <- c(str:end) # discard burn-in
+  
+  X <- mcmc_array(list(out_1, out_2, out_3, out_4))[j,,] %>% matrix(nrow = 32000) 
+  write.table(X, file = paste(che.list[i], "_setpts.out", sep = ""), row.names = F, sep = "\t")
+  colnames(X) <- colnames(out_1)
+  write.csv(X, file = paste("outputs/", che.list[i], "_Transwell_single_setpts.csv", sep = ""), row.names = F)
+  
+  setpts.file <- paste(che.list[i], "_single_setpts.in.R", sep = "")
+  X_setpts <- mcsim(model, setpts.file)
+  vars <- names(X_setpts)
+  index <- which(vars == "C1_blood_1.1" | vars == "C2_lumen_1.49")
+  simulation_result <- as.data.frame(apply(X_setpts[index[1]:index[2]], 2, quantile,  c(0.5, 0.05, 0.95)) %>% t())
+  colnames(simulation_result) <- c("median", "LCL", "UCL")
+  simulation_result$time <- rep(c(0:48), 6)
+  simulation_result$compartment.name <- rep(rep(c("Blood", "Cell", "Lumen"), each = 49), 2)
+  simulation_result$study <- rep(c("AtoB", "BtoA"), each = 147)
+  write.csv(simulation_result, file = paste("outputs/", che.list[i], "_Transwell_single_simulation_result.csv", sep = ""), row.names = F)
+  
+  
+  
+  # ----- CNBio_single ----- 
+  file.name.1 <- paste(che.list[i], "_CNBio_single_mcmc_1.in.R", sep = "")
+  file.name.2 <- paste(che.list[i], "_CNBio_single_mcmc_2.in.R", sep = "")
+  file.name.3 <- paste(che.list[i], "_CNBio_single_mcmc_3.in.R", sep = "")
+  file.name.4 <- paste(che.list[i], "_CNBio_single_mcmc_4.in.R", sep = "")
+  out_1 <- mcsim(model, file.name.1)
+  out_2 <- mcsim(model, file.name.2)
+  out_3 <- mcsim(model, file.name.3)
+  out_4 <- mcsim(model, file.name.4)
+  
+  out_all <- rbind(out_1, out_2, out_3, out_4)
+  write.csv(out_all, paste("outputs/", che.list[i], "_CNBio_single_alliters.csv", sep = ""))
+  
+  R_hat.results <- monitor(mcmc_array(list(out_1, out_2, out_3, out_4)), digits = 4, warmup = 2000)
+  write.csv(R_hat.results, paste("outputs/", che.list[i], "_CNBio_single_R_hat.results.csv", sep = ""))
+  
+  str <- ceiling(nrow(out_1)/5) + 1
+  end <- nrow(out_1)
+  j <- c(str:end) # discard burn-in
+  
+  X <- mcmc_array(list(out_1, out_2, out_3, out_4))[j,,] %>% matrix(nrow = 32000) 
+  write.table(X, file = paste(che.list[i], "_setpts.out", sep = ""), row.names = F, sep = "\t")
+  colnames(X) <- colnames(out_1)
+  write.csv(X, file = paste("outputs/", che.list[i], "_CNBio_single_setpts.csv", sep = ""), row.names = F)
+  
+  setpts.file <- paste(che.list[i], "_single_setpts.in.R", sep = "")
+  X_setpts <- mcsim(model, setpts.file)
+  vars <- names(X_setpts)
+  index <- which(vars == "C1_blood_1.1" | vars == "C2_lumen_1.49")
+  simulation_result <- as.data.frame(apply(X_setpts[index[1]:index[2]], 2, quantile,  c(0.5, 0.05, 0.95)) %>% t())
+  colnames(simulation_result) <- c("median", "LCL", "UCL")
+  simulation_result$time <- rep(c(0:48), 6)
+  simulation_result$compartment.name <- rep(rep(c("Blood", "Cell", "Lumen"), each = 49), 2)
+  simulation_result$study <- rep(c("AtoB", "BtoA"), each = 147)
+  write.csv(simulation_result, file = paste("outputs/", che.list[i], "_CNBio_single_simulation_result.csv", sep = ""), row.names = F)
+  
+  
+  # ----- Transwell_mixture ----- 
+  file.name.1 <- paste(che.list[i], "_Transwell_mixture_mcmc_1.in.R", sep = "")
+  file.name.2 <- paste(che.list[i], "_Transwell_mixture_mcmc_2.in.R", sep = "")
+  file.name.3 <- paste(che.list[i], "_Transwell_mixture_mcmc_3.in.R", sep = "")
+  file.name.4 <- paste(che.list[i], "_Transwell_mixture_mcmc_4.in.R", sep = "")
+  out_1 <- mcsim(model, file.name.1)
+  out_2 <- mcsim(model, file.name.2)
+  out_3 <- mcsim(model, file.name.3)
+  out_4 <- mcsim(model, file.name.4)
+  
+  out_all <- rbind(out_1, out_2, out_3, out_4)
+  write.csv(out_all, paste("outputs/", che.list[i], "_Transwell_mixture_alliters.csv", sep = ""))
+  
+  R_hat.results <- monitor(mcmc_array(list(out_1, out_2, out_3, out_4)), digits = 4, warmup = 2000)
+  write.csv(R_hat.results, paste("outputs/", che.list[i], "_Transwell_mixture_R_hat.results.csv", sep = ""))
+  
+  str <- ceiling(nrow(out_1)/5) + 1
+  end <- nrow(out_1)
+  j <- c(str:end) # discard burn-in
+  
+  X <- mcmc_array(list(out_1, out_2, out_3, out_4))[j,,] %>% matrix(nrow = 32000) 
+  write.table(X, file = paste(che.list[i], "_setpts.out", sep = ""), row.names = F, sep = "\t")
+  colnames(X) <- colnames(out_1)
+  write.csv(X, file = paste("outputs/", che.list[i], "_Transwell_mixture_setpts.csv", sep = ""), row.names = F)
+  
+  setpts.file <- paste(che.list[i], "_mixture_setpts.in.R", sep = "")
+  X_setpts <- mcsim(model, setpts.file)
+  vars <- names(X_setpts)
+  index <- which(vars == "C1_blood_1.1" | vars == "C2_lumen_1.49")
+  simulation_result <- as.data.frame(apply(X_setpts[index[1]:index[2]], 2, quantile,  c(0.5, 0.05, 0.95)) %>% t())
+  colnames(simulation_result) <- c("median", "LCL", "UCL")
+  simulation_result$time <- rep(c(0:48), 6)
+  simulation_result$compartment.name <- rep(rep(c("Blood", "Cell", "Lumen"), each = 49), 2)
+  simulation_result$study <- rep(c("AtoB", "BtoA"), each = 147)
+  write.csv(simulation_result, file = paste("outputs/", che.list[i], "_Transwell_mixture_simulation_result.csv", sep = ""), row.names = F)
+  
+  
+  
+  # ----- CNBio_mixture ----- 
+  file.name.1 <- paste(che.list[i], "_CNBio_mixture_mcmc_1.in.R", sep = "")
+  file.name.2 <- paste(che.list[i], "_CNBio_mixture_mcmc_2.in.R", sep = "")
+  file.name.3 <- paste(che.list[i], "_CNBio_mixture_mcmc_3.in.R", sep = "")
+  file.name.4 <- paste(che.list[i], "_CNBio_mixture_mcmc_4.in.R", sep = "")
+  out_1 <- mcsim(model, file.name.1)
+  out_2 <- mcsim(model, file.name.2)
+  out_3 <- mcsim(model, file.name.3)
+  out_4 <- mcsim(model, file.name.4)
+  
+  out_all <- rbind(out_1, out_2, out_3, out_4)
+  write.csv(out_all, paste("outputs/", che.list[i], "_CNBio_mixture_alliters.csv", sep = ""))
+  
+  R_hat.results <- monitor(mcmc_array(list(out_1, out_2, out_3, out_4)), digits = 4, warmup = 2000)
+  write.csv(R_hat.results, paste("outputs/", che.list[i], "_CNBio_mixture_R_hat.results.csv", sep = ""))
+  
+  str <- ceiling(nrow(out_1)/5) + 1
+  end <- nrow(out_1)
+  j <- c(str:end) # discard burn-in
+  
+  X <- mcmc_array(list(out_1, out_2, out_3, out_4))[j,,] %>% matrix(nrow = 32000) 
+  write.table(X, file = paste(che.list[i], "_setpts.out", sep = ""), row.names = F, sep = "\t")
+  colnames(X) <- colnames(out_1)
+  write.csv(X, file = paste("outputs/", che.list[i], "_CNBio_mixture_setpts.csv", sep = ""), row.names = F)
+  
+  setpts.file <- paste(che.list[i], "_mixture_setpts.in.R", sep = "")
+  X_setpts <- mcsim(model, setpts.file)
+  vars <- names(X_setpts)
+  index <- which(vars == "C1_blood_1.1" | vars == "C2_lumen_1.49")
+  simulation_result <- as.data.frame(apply(X_setpts[index[1]:index[2]], 2, quantile,  c(0.5, 0.05, 0.95)) %>% t())
+  colnames(simulation_result) <- c("median", "LCL", "UCL")
+  simulation_result$time <- rep(c(0:48), 6)
+  simulation_result$compartment.name <- rep(rep(c("Blood", "Cell", "Lumen"), each = 49), 2)
+  simulation_result$study <- rep(c("AtoB", "BtoA"), each = 147)
+  write.csv(simulation_result, file = paste("outputs/", che.list[i], "_CNBio_mixture_simulation_result.csv", sep = ""), row.names = F)
+  
+}
+```
+
+
+```{r Parameter posterior distribution (Figure S3)}
+# Data preparation
+setpts.3PFAS <- c()
+Rhat.3PFAS <- c()
+
+for (i in 1:3){
+  
+  setpts.1 <- read.csv(paste("outputs/", che.list[i], "_Transwell_single_setpts.csv", sep = ""))
+  setpts.2 <- read.csv(paste("outputs/", che.list[i], "_Transwell_mixture_setpts.csv", sep = ""))
+  setpts.3 <- read.csv(paste("outputs/", che.list[i], "_CNBio_single_setpts.csv", sep = ""))
+  setpts.4 <- read.csv(paste("outputs/", che.list[i], "_CNBio_mixture_setpts.csv", sep = ""))
+  
+  colnames(setpts.1)[2:5] <- c("p1", "p2", "p3", "p4")
+  colnames(setpts.2)[2:5] <- c("p1", "p2", "p3", "p4")
+  colnames(setpts.3)[2:5] <- c("p1", "p2", "p3", "p4")
+  colnames(setpts.4)[2:5] <- c("p1", "p2", "p3", "p4")
+  
+  setpts.1 <- stack(setpts.1[,2:5])
+  setpts.2 <- stack(setpts.2[,2:5])
+  setpts.3 <- stack(setpts.3[,2:5])
+  setpts.4 <- stack(setpts.4[,2:5])
+  
+  setpts.all <- rbind(setpts.1, setpts.2, setpts.3, setpts.4)
+  setpts.all$PFAS <- che.lable[i]
+  setpts.all$chain.num <- rep(rep(rep(c(1:4), each = 8000), 4), 4)
+  setpts.all$assay <- rep(c("Static", "Fluidic"), each = 256000)
+  setpts.all$expo <- rep(rep(c("Single", "Mixture"), each = 128000), 2)
+  
+  setpts.all$values <- exp(setpts.all$values)
+  setpts.3PFAS <- rbind(setpts.3PFAS, setpts.all)
+  
+  Rhat.1 <- read.csv(paste("outputs/", che.list[i], "_Transwell_single_R_hat.results.csv", sep = ""))
+  Rhat.2 <- read.csv(paste("outputs/", che.list[i], "_Transwell_mixture_R_hat.results.csv", sep = ""))
+  Rhat.3 <- read.csv(paste("outputs/", che.list[i], "_CNBio_single_R_hat.results.csv", sep = ""))
+  Rhat.4 <- read.csv(paste("outputs/", che.list[i], "_CNBio_mixture_R_hat.results.csv", sep = ""))
+  
+  Rhat_summary <- data.frame(assay = rep(c("Static", "Fluidic"), each = 8),
+                             expo = rep(rep(c("Single", "Mixture"), each = 4), 2),
+                             PFAS = che.lable[i],
+                             ind = rep(c("p1", "p2", "p3", "p4"), 4),
+                             Rhat = c(Rhat.1$Rhat[2:5], Rhat.2$Rhat[2:5], Rhat.3$Rhat[2:5], Rhat.4$Rhat[2:5]))
+  Rhat.3PFAS <- rbind(Rhat.3PFAS, Rhat_summary)
+  
+}
+setpts.3PFAS$PFAS <- factor(setpts.3PFAS$PFAS, levels = c("PFOS", "PFHxA", "PFBS"))
+setpts.3PFAS$chain.num <- factor(setpts.3PFAS$chain.num)
+setpts.3PFAS$assay <- factor(setpts.3PFAS$assay, levels = c("Static", "Fluidic"))
+setpts.3PFAS$expo <- factor(setpts.3PFAS$expo, levels = c("Single", "Mixture"))
+setpts.3PFAS$ind <- factor(setpts.3PFAS$ind, levels = c("p4", "p3", "p2", "p1"))
+Rhat.3PFAS$PFAS <- factor(Rhat.3PFAS$PFAS, levels = c("PFOS", "PFHxA", "PFBS"))
+Rhat.3PFAS$assay <- factor(Rhat.3PFAS$assay, levels = c("Static", "Fluidic"))
+Rhat.3PFAS$expo <- factor(Rhat.3PFAS$expo, levels = c("Single", "Mixture"))
+Rhat.3PFAS$ind <- factor(Rhat.3PFAS$ind, levels = c("p4", "p3", "p2", "p1"))
+
+
+# Figure S3 - Parameter posterior distribution
+pdf(width = 10, height = 7.5, "plots/Figure S3.pdf")
+ggplot(data = setpts.3PFAS)+
+  geom_density_ridges(aes(x = values, y = ind, color = chain.num, fill = chain.num), size = 0.8, alpha = 0.5, height = 1, scale = 1.25) + 
+  geom_text(
+    data    = Rhat.3PFAS,
+    mapping = aes(x = 1E+9, y = ind, label = round(Rhat, 3)),
+    color = "black", vjust = -0.5)+
+  #annotate(geom="text", x=1E+9, y=4.8, label="R-hat", color="black", fontface = "bold")+
+  scale_x_log10(lim = c(1E-10, 1E+12),
+                breaks = trans_breaks("log10", function(x) 10^x, n = 8),
+                labels = trans_format("log10", math_format(10^.x))) +
+  facet_nested(PFAS ~ assay+expo, nest_line = element_line(linetype = 1)) + 
+  xlab("Value (cm/hr)")+
+  ylab("Parameter")+
+  scale_color_manual(values = c("#EAFDFC", "#BFEAF5","#91D8E4","#82AAE3"))+
+  scale_fill_manual(values = c("#EAFDFC", "#BFEAF5","#91D8E4","#82AAE3"))+
+  theme_bw() +
+  theme(text=element_text(family="sans", face="plain", color="#000000", size=12),
+        title = element_text(color = "black", size=12),
+        plot.title = element_text(color = "black", face = "bold", size=16),
+        panel.grid.major.x = element_blank(),
+        panel.grid.major.y = element_line(color = "gray", linetype = "dashed"),
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(size = 1.2),
+        ggh4x.facet.nestline = element_line(size = 0.7),
+        legend.position = "none", 
+        strip.text.x = element_text(color = "black", face = "bold", size=12),
+        strip.text.y = element_text(color = "black", face = "bold", size=12, angle = 0),
+        strip.background = element_blank(),
+        axis.ticks = element_line(color = "black"),
+        axis.title = element_text(color = "black", size=12),
+        axis.text = element_text(color = "black", size=10))
+dev.off()
+
+```
+
+
+```{r Simulation performance (Figures S4 and 4)}
+# Data preparation
+sim.result.allpfas <- c()
+obs.conc.data.allpfas <- c()
+for (i in 1:3){
+  
+  # time-course
+  sim.result.1 <- read.csv(paste("outputs/", che.list[i], "_Transwell_single_simulation_result.csv", sep = ""))
+  sim.result.2 <- read.csv(paste("outputs/", che.list[i], "_Transwell_mixture_simulation_result.csv", sep = ""))
+  sim.result.3 <- read.csv(paste("outputs/", che.list[i], "_CNBio_single_simulation_result.csv", sep = ""))
+  sim.result.4 <- read.csv(paste("outputs/", che.list[i], "_CNBio_mixture_simulation_result.csv", sep = ""))
+  
+  sim.result.all <- rbind(sim.result.1, sim.result.2, sim.result.3, sim.result.4)
+  sim.result.all$assay <- rep(c("Static", "Fluidic"), each = 588)
+  sim.result.all$expo <- rep(rep(c("Single", "Mixture"), each = 294), 2)
+  sim.result.all <- rbind(sim.result.all[which(sim.result.all$study == "AtoB" & sim.result.all$compartment.name == "Blood"), ],
+                          sim.result.all[which(sim.result.all$study == "BtoA" & sim.result.all$compartment.name == "Lumen"), ],
+                          sim.result.all[which(sim.result.all$study == "AtoB" & sim.result.all$compartment.name == "Cell"), ],
+                          sim.result.all[which(sim.result.all$study == "BtoA" & sim.result.all$compartment.name == "Cell"), ])
+  #sim.result.all$compartment.name[which(sim.result.all$compartment.name == "Blood" | sim.result.all$compartment.name == "Lumen")] <- "Blood/Lumen"
+  sim.result.all$assay <- factor(sim.result.all$assay, levels = c("Static", "Fluidic"))
+  sim.result.all$expo <- factor(sim.result.all$expo, levels = c("Single", "Mixture"))
+  sim.result.all$study <- factor(sim.result.all$study, levels = c("AtoB", "BtoA"))
+  sim.result.all$PFAS <- che.lable[i]
+  
+  obs.conc.data <-  read.csv(paste("data/", che.list[i], ".obs.conc.data.csv", sep = ""))
+  #obs.conc.data$compartment.name[which(obs.conc.data$compartment.name == "Blood" | obs.conc.data$compartment.name == "Lumen")] <- "Blood/Lumen"
+  obs.conc.data$assay <- factor(obs.conc.data$assay, levels = c("Static", "Fluidic"))
+  obs.conc.data$expo <- factor(obs.conc.data$expo, levels = c("Single", "Mixture"))
+  obs.conc.data$study <- factor(obs.conc.data$study, levels = c("AtoB", "BtoA"))
+  
+  
+  #comparison observation and simulation results
+  sim.result.all$seach <- paste(sim.result.all$study, sim.result.all$time, sim.result.all$compartment.name, sim.result.all$assay, sim.result.all$expo, sep = "_")
+  obs.conc.data$seach <- paste(obs.conc.data$study, obs.conc.data$time, obs.conc.data$compartment.name, obs.conc.data$assay, obs.conc.data$expo, sep = "_")
+  for(j in 1:length(obs.conc.data$time)){
+    obs.conc.data$Pred_conc[j] <- sim.result.all$median[which(sim.result.all$seach == obs.conc.data$seach[j])]
+    print(j)
+    
+  }
+  obs.conc.data$ratio <- log10(obs.conc.data$Pred_conc/obs.conc.data$Obs_conc)
+  obs.conc.data$abs.dev <- abs(obs.conc.data$ratio)
+  
+  sim.result.allpfas <- rbind(sim.result.allpfas, sim.result.all)
+  obs.conc.data.allpfas <- rbind(obs.conc.data.allpfas, obs.conc.data)
+  
+}
+
+sim.result.allpfas$PFAS <- factor(sim.result.allpfas$PFAS, levels = c("PFOS", "PFHxA", "PFBS"))
+obs.conc.data.allpfas$PFAS <- factor(obs.conc.data.allpfas$PFAS, levels = c("PFOS", "PFHxA", "PFBS"))
+
+sim.result.allpfas$compartment.name <- factor(sim.result.allpfas$compartment.name, levels = c("Blood", "Lumen", "Cell"))
+obs.conc.data.allpfas$compartment.name <- factor(obs.conc.data.allpfas$compartment.name, levels = c("Blood", "Lumen", "Cell"))
+
+#sim.result.allpfas <- sim.result.allpfas[-which(sim.result.allpfas$time == 0),]
+sim.result.allpfas[which(sim.result.allpfas$time == 0),1:3] <- 1e-4
+
+
+
+# Figure S4 - Time-dependent concentration comparison
+Figure.S4a <- 
+ggplot(sim.result.allpfas[which(sim.result.allpfas$study == "AtoB"),])+
+  geom_ribbon(aes(x = time, ymin = LCL, ymax = UCL, fill=PFAS), alpha = 0.3) +
+  geom_line(aes(x = time, y = median, color = PFAS), size = 1.2)+
+  geom_point(data = obs.conc.data.allpfas[which(obs.conc.data.allpfas$study == "AtoB"),], aes(x = time, y = Obs_conc), size = 2, color = "#0B275B", alpha = 0.8)+
+  facet_nested(compartment.name+PFAS~study+assay+expo, scales = "free", nest_line = element_line(linetype = 1))+
+  xlab("Time (hour)") +
+  ylab("Concentration (uM)")+
+  scale_color_manual(values = c("#167CF2","#6FCC33","#F28E16"))+
+  scale_fill_manual(values = c("#167CF2","#6FCC33","#F28E16"))+
+  scale_x_continuous(lim = c(0, 48),
+                     breaks = c(0, 12, 24, 36, 48),
+                     labels = c(0, 12, 24, 36, 48)) +
+  scale_y_log10(limits = c(1e-4, 1e+5),
+                breaks = trans_breaks("log10", function(x) 10^x, n = 5),
+                labels = trans_format("log10", math_format(10^.x))) +
+  theme_bw() +
+  theme(text=element_text(family="sans", face="plain", color="#000000", size=12),
+        title = element_text(color = "black", size=12),
+        panel.grid = element_blank(),
+        panel.border = element_rect(size = 1.2),
+        ggh4x.facet.nestline = element_line(size = 0.7),
+        legend.position = "none",
+        strip.text.x = element_text(color = "black", face = "bold", size=12),
+        strip.text.y = element_text(color = "black", face = "bold", size=12, angle = 0),
+        strip.background = element_blank(),
+        axis.ticks = element_line(color = "black"),
+        axis.title = element_text(color = "black", size=12),
+        axis.text.y = element_text(color = "black", size=10),
+        axis.text.x = element_text(color = "black", size=10))
+Figure.S4b <- 
+  ggplot(sim.result.allpfas[which(sim.result.allpfas$study == "BtoA"),])+
+  geom_ribbon(aes(x = time, ymin = LCL, ymax = UCL, fill=PFAS), alpha = 0.3) +
+  geom_line(aes(x = time, y = median, color = PFAS), size = 1.2)+
+  geom_point(data = obs.conc.data.allpfas[which(obs.conc.data.allpfas$study == "BtoA"),], aes(x = time, y = Obs_conc), size = 2, color = "#0B275B", alpha = 0.8)+
+  facet_nested(compartment.name+PFAS~study+assay+expo, scales = "free", nest_line = element_line(linetype = 1))+
+  xlab("Time (hour)") +
+  ylab("Concentration (uM)")+
+  scale_color_manual(values = c("#167CF2","#6FCC33","#F28E16"))+
+  scale_fill_manual(values = c("#167CF2","#6FCC33","#F28E16"))+
+  scale_x_continuous(lim = c(0, 48),
+                     breaks = c(0, 12, 24, 36, 48),
+                     labels = c(0, 12, 24, 36, 48)) +
+  scale_y_log10(limits = c(1e-4, 1e+5),
+                breaks = trans_breaks("log10", function(x) 10^x, n = 5),
+                labels = trans_format("log10", math_format(10^.x))) +
+  theme_bw() +
+  theme(text=element_text(family="sans", face="plain", color="#000000", size=12),
+        title = element_text(color = "black", size=12),
+        panel.grid = element_blank(),
+        panel.border = element_rect(size = 1.2),
+        ggh4x.facet.nestline = element_line(size = 0.7),
+        legend.position = "none",
+        strip.text.x = element_text(color = "black", face = "bold", size=12),
+        strip.text.y = element_text(color = "black", face = "bold", size=12, angle = 0),
+        strip.background = element_blank(),
+        axis.ticks = element_line(color = "black"),
+        axis.title = element_text(color = "black", size=12),
+        axis.text.y = element_text(color = "black", size=10),
+        axis.text.x = element_text(color = "black", size=10))
+
+pdf(width = 16, height = 9.5, "plots/Figure S2.pdf")
+Figure.S4a + Figure.S4b + plot_layout(widths = c(1/2, 1/2))
+dev.off()
+
+
+
+
+# Figure 4 - Scatter plot for comparing measured and simulated concentration
+colnames(obs.conc.data.allpfas)[3:4] <- c("Study", "Compartment")
+
+Fig.scatter <- 
+ggplot(obs.conc.data.allpfas, aes(x = Obs_conc, y = Pred_conc))+
+  geom_point(aes(color = Study, shape = Compartment), size = 3.5) +
+  xlab("Experimental concentration") +
+  ylab("Predicted concentration")+
+  #ggtitle("A") + 
+  geom_abline(intercept = 0, slope = 1, linetype=2, size = 0.35)+
+  facet_nested(PFAS~expo+assay, nest_line = element_line(linetype = 1), axes = "all", remove_labels = "all")+
+  scale_shape_manual(values = c(16, 1, 17))+
+  scale_color_manual(values = c("#E69F00", "#56B4E9"))+
+  scale_x_log10(lim = c(1E-4, 4E+4),
+                breaks = trans_breaks("log10", function(x) 10^x, n = 4),
+                labels = trans_format("log10", math_format(10^.x))) +
+  scale_y_log10(lim = c(1E-4, 4E+4),
+                breaks = trans_breaks("log10", function(x) 10^x, n = 4),
+                labels = trans_format("log10", math_format(10^.x))) +
+  theme_bw() +
+  theme(text=element_text(family="sans", face="plain", color="#000000", size=12),
+        title = element_text(color = "black", size=12),
+        plot.title = element_text(color = "black", face = "bold", size=16),
+        panel.grid = element_blank(),
+        panel.border = element_rect(size = 0.6),
+        ggh4x.facet.nestline = element_line(size = 0.35),
+        legend.title = element_text(color = "black", size=11),
+        legend.text = element_text(color = "black", size=10),
+        #legend.box.background = element_rect(colour = "black"),
+        legend.background = element_blank(),
+        #legend.key.size = unit(0.4, 'cm'),
+        #legend.position = c(0.055, 0.8), 
+        strip.text.x = element_text(color = "black", size=12),
+        strip.text.y = element_text(color = "black", size=12, angle = 0),
+        strip.background = element_blank(),
+        axis.ticks = element_line(color = "black", size = 0.3),
+        axis.title = element_text(color = "black", size=12),
+        axis.text = element_text(color = "black", size=9))
+
+pdf(width = 10, height = 6.5, "plots/Figure 4.pdf")
+Fig.scatter
+dev.off()
+
+obs.conc.data.allpfas$lable <- paste(obs.conc.data.allpfas$PFAS, obs.conc.data.allpfas$assay.2, obs.conc.data.allpfas$expo, sep = "_")
+
+cor.test(obs.conc.data.allpfas$Obs_conc[which(obs.conc.data.allpfas$lable == "PFOS_Transwell_Single")], 
+         obs.conc.data.allpfas$Pred_conc[which(obs.conc.data.allpfas$lable == "PFOS_Transwell_Single")], method = c("spearman"))
+
+cor.test(obs.conc.data.allpfas$Obs_conc[which(obs.conc.data.allpfas$lable == "PFOS_CNBio_Single")], 
+         obs.conc.data.allpfas$Pred_conc[which(obs.conc.data.allpfas$lable == "PFOS_CNBio_Single")], method = c("spearman"))
+
+cor.test(obs.conc.data.allpfas$Obs_conc[which(obs.conc.data.allpfas$lable == "PFOS_Transwell_Mixture")], 
+         obs.conc.data.allpfas$Pred_conc[which(obs.conc.data.allpfas$lable == "PFOS_Transwell_Mixture")], method = c("spearman"))
+
+cor.test(obs.conc.data.allpfas$Obs_conc[which(obs.conc.data.allpfas$lable == "PFOS_CNBio_Mixture")], 
+         obs.conc.data.allpfas$Pred_conc[which(obs.conc.data.allpfas$lable == "PFOS_CNBio_Mixture")], method = c("spearman"))
+
+cor.test(obs.conc.data.allpfas$Obs_conc[which(obs.conc.data.allpfas$lable == "PFBS_Transwell_Single")], 
+         obs.conc.data.allpfas$Pred_conc[which(obs.conc.data.allpfas$lable == "PFBS_Transwell_Single")], method = c("spearman"))
+
+cor.test(obs.conc.data.allpfas$Obs_conc[which(obs.conc.data.allpfas$lable == "PFBS_CNBio_Single")], 
+         obs.conc.data.allpfas$Pred_conc[which(obs.conc.data.allpfas$lable == "PFBS_CNBio_Single")], method = c("spearman"))
+
+cor.test(obs.conc.data.allpfas$Obs_conc[which(obs.conc.data.allpfas$lable == "PFBS_Transwell_Mixture")], 
+         obs.conc.data.allpfas$Pred_conc[which(obs.conc.data.allpfas$lable == "PFBS_Transwell_Mixture")], method = c("spearman"))
+
+cor.test(obs.conc.data.allpfas$Obs_conc[which(obs.conc.data.allpfas$lable == "PFBS_CNBio_Mixture")], 
+         obs.conc.data.allpfas$Pred_conc[which(obs.conc.data.allpfas$lable == "PFBS_CNBio_Mixture")], method = c("spearman"))
+
+cor.test(obs.conc.data.allpfas$Obs_conc[which(obs.conc.data.allpfas$lable == "PFHxA_Transwell_Single")], 
+         obs.conc.data.allpfas$Pred_conc[which(obs.conc.data.allpfas$lable == "PFHxA_Transwell_Single")], method = c("spearman"))
+
+cor.test(obs.conc.data.allpfas$Obs_conc[which(obs.conc.data.allpfas$lable == "PFHxA_CNBio_Single")], 
+         obs.conc.data.allpfas$Pred_conc[which(obs.conc.data.allpfas$lable == "PFHxA_CNBio_Single")], method = c("spearman"))
+
+cor.test(obs.conc.data.allpfas$Obs_conc[which(obs.conc.data.allpfas$lable == "PFHxA_Transwell_Mixture")], 
+         obs.conc.data.allpfas$Pred_conc[which(obs.conc.data.allpfas$lable == "PFHxA_Transwell_Mixture")], method = c("spearman"))
+
+cor.test(obs.conc.data.allpfas$Obs_conc[which(obs.conc.data.allpfas$lable == "PFHxA_CNBio_Mixture")], 
+         obs.conc.data.allpfas$Pred_conc[which(obs.conc.data.allpfas$lable == "PFHxA_CNBio_Mixture")], method = c("spearman"))
+
+
+```
+
+
+```{r P ratio (Figure 5)}
+# Data preparation
+fub <- c(0.0049, 0.0128, 0.0068) #using fraction ubound in plasma -> Smeltz et al: UC assay + UPLC-MS/MS 
+Qk <- 29.64556*1000*24
+Qu <- 6.7732*1000*24*0.3
+
+P_ratio.all <- c()
+for (i in 1:3){
+  
+  setpts.1 <- read.csv(paste("outputs/", che.list[i], "_Transwell_single_setpts.csv", sep = ""))
+  setpts.2 <- read.csv(paste("outputs/", che.list[i], "_Transwell_mixture_setpts.csv", sep = ""))
+  setpts.3 <- read.csv(paste("outputs/", che.list[i], "_CNBio_single_setpts.csv", sep = ""))
+  setpts.4 <- read.csv(paste("outputs/", che.list[i], "_CNBio_mixture_setpts.csv", sep = ""))
+  
+  colnames(setpts.1)[2:5] <- c("p1", "p2", "p3", "p4")
+  colnames(setpts.2)[2:5] <- c("p1", "p2", "p3", "p4")
+  colnames(setpts.3)[2:5] <- c("p1", "p2", "p3", "p4")
+  colnames(setpts.4)[2:5] <- c("p1", "p2", "p3", "p4")
+  
+  setpts.1[, 2:5] <- exp(setpts.1[, 2:5])
+  setpts.2[, 2:5] <- exp(setpts.2[, 2:5])
+  setpts.3[, 2:5] <- exp(setpts.3[, 2:5])
+  setpts.4[, 2:5] <- exp(setpts.4[, 2:5])
+  
+  setpts.all <- rbind(setpts.1[, 2:5], setpts.2[, 2:5], setpts.3[, 2:5], setpts.4[, 2:5])
+  setpts.all$P_ratio <- (setpts.all$p2*setpts.all$p4)/(setpts.all$p1*setpts.all$p3)
+  setpts.all$CL <- fub[i]*(Qk*(Qu*setpts.all$P_ratio)/(Qu*setpts.all$P_ratio+(Qk-Qu)))/70
+  setpts.all$PFAS <- che.lable[i]
+  setpts.all$assay <- rep(c("Static", "Fluidic"), each = 64000)
+  setpts.all$expo <- rep(rep(c("Single", "Mixture"), each = 32000), 2)
+  
+  P_ratio.all <- rbind(P_ratio.all, setpts.all)
+  
+}
+
+P_ratio.all$ID <- rep(c(2,5,3,6, 14,17,15,18, 8,11,9,12), each = 32000)
+
+P_ratio.all.summ <- ddply(P_ratio.all, .(ID,PFAS,assay, expo), summarize, 
+                          median = median(P_ratio, na.rm = T),
+                          Q5 = quantile(P_ratio, probs = c(0.05)),
+                          Q25 = quantile(P_ratio, probs = c(0.25)),
+                          Q75 = quantile(P_ratio, probs = c(0.75)),
+                          Q95 = quantile(P_ratio, probs = c(0.95)))
+
+P_ratio_2D <- read.csv("data/p_ratio_2D.csv")
+P_ratio_2D$ID <- rep(c(1,4,13,16,7,10), each =5)
+
+
+P_ratio.all.summ.boxplot <- rbind(P_ratio.all.summ[,1:4],P_ratio.all.summ[,1:4],P_ratio.all.summ[,1:4],P_ratio.all.summ[,1:4],P_ratio.all.summ[,1:4])
+P_ratio.all.summ.boxplot$value <- stack(P_ratio.all.summ[,5:9])$values
+
+P_ratio.all.summ.boxplot <- rbind(P_ratio.all.summ.boxplot, P_ratio_2D)
+
+P_ratio.all.summ.boxplot[91,] <- c(0, "PFOS", NA, NA, NA)
+P_ratio.all.summ.boxplot$PFAS <- factor(P_ratio.all.summ.boxplot$PFAS, levels = c("PFOS", "PFBS", "PFHxA"))
+P_ratio.all.summ.boxplot$value <- as.numeric(P_ratio.all.summ.boxplot$value)
+P_ratio.all.summ.boxplot$ID <- as.numeric(P_ratio.all.summ.boxplot$ID)
+
+P_ratio.all.summ.boxplot$PFAS <- factor(P_ratio.all.summ.boxplot$PFAS, levels = c("PFOS", "PFBS", "PFHxA"))
+P_ratio.all.summ.boxplot$assay <- factor(P_ratio.all.summ.boxplot$assay, levels = c("2D","Static", "Fluidic"))
+P_ratio.all.summ.boxplot$expo <- factor(P_ratio.all.summ.boxplot$expo, levels = c("Single", "Mixture"))
+
+P_ratio_CL_raw <-  read.csv("data/p_ratio_2D_raw.csv")
+P_ratio_CL_raw$ID <- c(rep(c(1,4), each =4), rep(c(13,16), each =3), rep(c(7,10), each =4))
+
+
+quantiles <- function(x) {
+  r <- sort(x)
+  names(r) <- c("ymin", "lower", "middle", "upper", "ymax")
+  r
+}
+
+Figure.5b <-
+  ggplot(P_ratio.all.summ.boxplot, aes(y=reorder(ID, -ID), x=value, fill=PFAS)) +
+  stat_summary(fun.data = quantiles, geom="errorbar", position = position_dodge(0.8), size=0.35, width=0.3)+
+  stat_summary(fun.data = quantiles, geom="boxplot", position = position_dodge(0.8), size=0.35, width=0.7)+
+  geom_point(data = P_ratio_CL_raw, aes(y=reorder(ID, -ID), x=p_ratio), shape=21, fill="white")+
+  #geom_point(data = P_ratio_CL_chip_equcal_raw, aes(y=reorder(ID, -ID), x=p_ratio_2), shape=23, fill="white")+
+  geom_vline(xintercept = 1,
+             linetype="dashed", color = "red", size = 0.4)+
+  scale_x_log10(lim = c(1E-5, 1E+1),
+                breaks = trans_breaks("log10", function(x) 10^x, n = 6),
+                labels = trans_format("log10", math_format(10^.x))) +
+  scale_fill_manual(values = c("#167CF2", "#F28E16", "#6FCC33"))+
+  labs(y = "", 
+       x= "P ratio")+
+  theme_bw() +
+  theme(panel.border = element_blank(),
+        panel.background = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(), 
+        legend.position = "none",
+        axis.line.x = element_line(colour = "black", size = 0.4),
+        axis.line.y = element_blank(),
+        axis.ticks.x= element_line(colour = "black", size = 0.4),
+        axis.ticks.y= element_blank(),
+        axis.text.x.bottom = element_text(size = 10, colour = "black"),
+        axis.text.y= element_blank(),
+        axis.title.x = element_text(size = 12, colour = "black"),
+        axis.title.y= element_blank())
+
+Pratio.datatitle.frame <- read.csv("data/Pratio.datatitle.frame_2D.csv")
+Figure.5a <-
+  ggplot(Pratio.datatitle.frame, aes(y=reorder(ID, -ID))) +
+  geom_text(aes(x = 0, label = PFAS), hjust = 0,
+            fontface = ifelse(Pratio.datatitle.frame$PFAS == "PFAS", "bold", "plain"),
+            size = ifelse(Pratio.datatitle.frame$PFAS == "PFAS", 4, 3.5))+
+  geom_text(aes(x = 0.1, label = expo), hjust = 0,
+            fontface = ifelse(Pratio.datatitle.frame$expo == "Design", "bold", "plain"),
+            size = ifelse(Pratio.datatitle.frame$expo == "Design", 4, 3.5))+
+  geom_text(aes(x = 0.2, label = Design), hjust = 0, size = 3.5)+
+  xlim(0, 0.25)+
+  ylab(NULL) + xlab("  ") + 
+  theme(axis.text.x = element_text(size = 12, colour = "white"), ## This is used to help with alignment
+        axis.line = element_blank(),
+        axis.text.y = element_blank(), 
+        axis.ticks = element_blank(),
+        axis.title.y = element_blank(), 
+        legend.position = "none",
+        panel.background = element_blank(), 
+        panel.border = element_blank(), 
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), 
+        plot.background = element_blank())
+
+pdf(width = 7, height = 5.5, "plots/Figure 5.pdf")
+Figure.5a + Figure.5b + plot_layout(widths = c(0.7/2, 1.3/2))
+dev.off()
+
+```
+
+
+```{r Renal clearance prediction (Figure 6)}
+# ---- Data preparation (no need to do this setion (line 671 - 694) again)
+#MED.CL <- ddply(P_ratio.all, .(PFAS, assay, expo), summarize, Med = quantile(CL, probs = c(0.5)), 
+#                LB = quantile(CL, probs = c(0.05)), UB = quantile(CL, probs = c(0.95)),
+#                Min = min(CL), Max = max(CL))
+#MED.CL$Study <- "New kidney model"
+#MED.CL$Type <- "In vitro"
+#kunze_ivive_results <- read.csv("data/kunze_ivive_results.csv")
+#kunze_ivive_results$assay <- factor(kunze_ivive_results$assay, levels = c("Static", "Fluidic"))
+#kunze_ivive_results$expo <- factor(kunze_ivive_results$expo, levels = c("Single", "Mixture"))
+
+#MED.CL.kunze <- ddply(kunze_ivive_results, .(PFAS, assay, expo), summarize, 
+#                      Med = quantile(CLr_ml_day_kg, probs = c(0.5),na.rm=T), 
+#                      LB = quantile(CLr_ml_day_kg, probs = c(0.05),na.rm=T), 
+#                      UB = quantile(CLr_ml_day_kg, probs = c(0.95),na.rm=T),
+#                      Min = min(CLr_ml_day_kg,na.rm=T), Max = max(CLr_ml_day_kg,na.rm=T))
+#MED.CL.kunze$Study <- "Kunze method"
+#MED.CL.kunze$Type <- "In vitro"
+#MED.CL.kunze$LB <- NA
+#MED.CL.kunze$UB <- NA
+
+#MED.CL.httk <- read.csv("data/MED.CL.httk.csv")
+#MED.CL.2D <- read.csv("data/MED.CL.2D.csv")
+#MED.CL.2D$assay <- "2D"
+#CL.comp.data <- rbind(MED.CL.httk, MED.CL.kunze, MED.CL.2D, MED.CL)
+#write.csv(CL.comp.data, "data/CL.comp.data.forscatter.csv") # Then compile the obseration data in Excel
+
+
+CL.comp.data.forscatter <- read.csv("data/CL.comp.data.forscatter.csv")
+CL.comp.data.forscatter$PFAS <- factor(CL.comp.data.forscatter$PFAS, levels = c("PFOS","PFHxA","PFBS"))
+CL.comp.data.forscatter$Exposure <- factor(CL.comp.data.forscatter$Exposure, levels = c("Single", "Mixture"))
+CL.comp.data.forscatter$Min <- as.numeric(CL.comp.data.forscatter$Min)
+CL.comp.data.forscatter$Max <- as.numeric(CL.comp.data.forscatter$Max)
+
+CL.comp.data.forscatter.1 <- CL.comp.data.forscatter[which(CL.comp.data.forscatter$Group == 1),]
+CL.comp.data.forscatter.2 <- CL.comp.data.forscatter[which(CL.comp.data.forscatter$Group == 2),]
+CL.comp.data.forscatter.3 <- CL.comp.data.forscatter[which(CL.comp.data.forscatter$Group == 3),]
+CL.comp.data.forscatter.4 <- CL.comp.data.forscatter[which(CL.comp.data.forscatter$Group == 4),]
+
+ciVal <- 0.5
+myMax <- 1E-4
+myMin <- 2E+3
+data2 <- data.frame(x = c(10^(seq(-4, 3, 1)), 2E+3), y = c(10^(seq(-4, 3, 1)), 2E+3))
+data2 <- data.frame(x = c(10^(seq(-5, 4, 1))), y = c(10^(seq(-5, 4, 1))))
+data2$min <- data2$y/10
+data2$max <- data2$y*10
+
+Figure.6a <- 
+ggplot(CL.comp.data.forscatter.1, aes(x = Obs, y = Med))+
+  geom_abline(intercept = 0, slope = 1, linetype=2, size = 0.35)+
+  geom_abline(intercept = 1, slope = 1, linetype=2, size = 0.35, color = "lightgray")+
+  geom_abline(intercept = -1, slope = 1, linetype=2, size = 0.35, color = "lightgray")+
+  geom_ribbon(data=data2, aes(x=x,ymin=min,ymax=max),inherit.aes = FALSE, fill = "lightgray", alpha = 0.2) +
+  geom_errorbar(aes(ymin = Min, ymax = Max, color = PFAS), width = 0, size = 1) +
+  geom_errorbarh(aes(y = Med, xmin = Obs.min, xmax = Obs.max, color = PFAS), height = 0, size = 0.4) +
+  #geom_errorbarh(aes(y = Med, xmin = Obs.5pert, xmax = Obs.95pert, color = PFAS), height = 0, size = 0.7) +
+  geom_errorbarh(aes(y = Med, xmin = Obs.LB, xmax = Obs.UB, color = PFAS), height = 0, size = 1) +
+  geom_point(aes(fill=PFAS, shape = Method), color = "black", size = 2.5) +
+  guides(fill = FALSE) +
+  xlab("") +
+  ylab("Predicted renal clearance (mL/Kg per day)") +
+  ggtitle("A. HTTK and Kunze method")+
+  scale_shape_manual(values = c(21, 24))+
+  scale_color_manual(values = c("#167CF2","#6FCC33","#F28E16"))+
+  scale_fill_manual(values = c("#167CF2","#6FCC33","#F28E16"))+
+  coord_cartesian(xlim = c(1E-4, 2E+3), ylim = c(1E-4, 2E+3))+
+  scale_x_log10(expand = c(0,0),
+                breaks = trans_breaks("log10", function(x) 10^x, n = 6),
+                labels = trans_format("log10", math_format(10^.x))) +
+  scale_y_log10(expand = c(0,0),
+                breaks = trans_breaks("log10", function(x) 10^x, n = 6),
+                labels = trans_format("log10", math_format(10^.x))) +
+  theme_bw() +
+  theme(text=element_text(family="sans", face="plain", color="#000000", size=12),
+        title = element_text(color = "black", size=12),
+        plot.title = element_text(color = "black", face = "bold", size=14),
+        panel.grid = element_blank(),
+        panel.border = element_rect(size = 0.6),
+        ggh4x.facet.nestline = element_line(size = 0.35),
+        legend.title = element_blank(),
+        legend.text = element_text(color = "black", size=10),
+        legend.margin = margin(-0.5,0,0,0, unit="cm"),
+        #legend.box.background = element_rect(colour = "black"),
+        legend.background = element_blank(),
+        #legend.key.size = unit(0.4, 'cm'),
+        legend.position = c(0.78, 0.2), 
+        strip.text.x = element_text(color = "black", size=12),
+        strip.text.y = element_text(color = "black", size=12, angle = 0),
+        strip.background = element_blank(),
+        axis.ticks = element_line(color = "black", size = 0.3),
+        axis.title = element_text(color = "black", size=12),
+        axis.text = element_text(color = "black", size=9))
+
+
+Figure.6b <- 
+ggplot(CL.comp.data.forscatter.2, aes(x = Obs, y = Med))+
+  geom_abline(intercept = 0, slope = 1, linetype=2, size = 0.35)+
+  geom_abline(intercept = 1, slope = 1, linetype=2, size = 0.35, color = "lightgray")+
+  geom_abline(intercept = -1, slope = 1, linetype=2, size = 0.35, color = "lightgray")+
+  geom_ribbon(data=data2, aes(x=x,ymin=min,ymax=max),inherit.aes = FALSE, fill = "lightgray", alpha = 0.2) +
+  geom_errorbar(aes(ymin = LB, ymax = UB, color = PFAS), width = 0, size = 1) +
+  geom_errorbarh(aes(y = Med, xmin = Obs.min, xmax = Obs.max, color = PFAS), height = 0, size = 0.4) +
+  #geom_errorbarh(aes(y = Med, xmin = Obs.5pert, xmax = Obs.95pert, color = PFAS), height = 0, size = 0.7) +
+  geom_errorbarh(aes(y = Med, xmin = Obs.LB, xmax = Obs.UB, color = PFAS), height = 0, size = 1) +
+  geom_point(aes(shape = Exposure, fill=PFAS),color = "black", size = 2.5) +
+  xlab("") +
+  ylab("") +
+  ggtitle("B. 2D cell culture")+
+  scale_shape_manual(values = c(21, 24))+
+  scale_color_manual(values = c("#167CF2","#6FCC33","#F28E16"))+ 
+  scale_fill_manual(values = c("#167CF2","#6FCC33","#F28E16"))+
+  guides(color = FALSE, fill = FALSE) +
+  coord_cartesian(xlim = c(1E-4, 2E+3), ylim = c(1E-4, 2E+3))+
+  scale_x_log10(expand = c(0,0),
+                breaks = trans_breaks("log10", function(x) 10^x, n = 6),
+                labels = trans_format("log10", math_format(10^.x))) +
+  scale_y_log10(expand = c(0,0),
+                breaks = trans_breaks("log10", function(x) 10^x, n = 6),
+                labels = trans_format("log10", math_format(10^.x))) +
+  theme_bw() +
+  theme(text=element_text(family="sans", face="plain", color="#000000", size=12),
+        title = element_text(color = "black", size=12),
+        plot.title = element_text(color = "black", face = "bold", size=14),
+        panel.grid = element_blank(),
+        panel.border = element_rect(size = 0.6),
+        ggh4x.facet.nestline = element_line(size = 0.35),
+        legend.title = element_blank(),
+        legend.text = element_text(color = "black", size=10),
+        #legend.box.background = element_rect(colour = "black"),
+        legend.background = element_blank(),
+        #legend.key.size = unit(0.4, 'cm'),
+        legend.position = c(0.8, 0.3), 
+        strip.text.x = element_text(color = "black", size=12),
+        strip.text.y = element_text(color = "black", size=12, angle = 0),
+        strip.background = element_blank(),
+        axis.ticks = element_line(color = "black", size = 0.3),
+        axis.title = element_text(color = "black", size=12),
+        axis.text = element_text(color = "black", size=9))
+
+Figure.6c <- 
+ggplot(CL.comp.data.forscatter.3, aes(x = Obs, y = Med))+
+  geom_abline(intercept = 0, slope = 1, linetype=2, size = 0.35)+
+  geom_abline(intercept = 1, slope = 1, linetype=2, size = 0.35, color = "lightgray")+
+  geom_abline(intercept = -1, slope = 1, linetype=2, size = 0.35, color = "lightgray")+
+  geom_ribbon(data=data2, aes(x=x,ymin=min,ymax=max),inherit.aes = FALSE, fill = "lightgray", alpha = 0.2) +
+  geom_errorbar(aes(ymin = LB, ymax = UB, color = PFAS), width = 0, size = 1) +
+  geom_errorbarh(aes(y = Med, xmin = Obs.min, xmax = Obs.max, color = PFAS), height = 0, size = 0.4) +
+  #geom_errorbarh(aes(y = Med, xmin = Obs.5pert, xmax = Obs.95pert, color = PFAS), height = 0, size = 0.7) +
+  geom_errorbarh(aes(y = Med, xmin = Obs.LB, xmax = Obs.UB, color = PFAS), height = 0, size = 1) +
+  geom_point(aes(shape = Exposure, fill=PFAS),color = "black", size = 2.5) +
+  xlab("Reported renal clearance (mL/Kg per day)") +
+  ylab("Predicted renal clearance (mL/Kg per day)") +
+  ggtitle("C. Transwell")+
+  scale_shape_manual(values = c(21, 24))+
+  scale_color_manual(values = c("#167CF2","#6FCC33","#F28E16"))+ 
+  scale_fill_manual(values = c("#167CF2","#6FCC33","#F28E16"))+
+  guides(color = FALSE, fill = FALSE) +
+  coord_cartesian(xlim = c(1E-4, 2E+3), ylim = c(1E-4, 2E+3))+
+  scale_x_log10(expand = c(0,0),
+                breaks = trans_breaks("log10", function(x) 10^x, n = 6),
+                labels = trans_format("log10", math_format(10^.x))) +
+  scale_y_log10(expand = c(0,0),
+                breaks = trans_breaks("log10", function(x) 10^x, n = 6),
+                labels = trans_format("log10", math_format(10^.x))) +
+  theme_bw() +
+  theme(text=element_text(family="sans", face="plain", color="#000000", size=12),
+        title = element_text(color = "black", size=12),
+        plot.title = element_text(color = "black", face = "bold", size=14),
+        panel.grid = element_blank(),
+        panel.border = element_rect(size = 0.6),
+        ggh4x.facet.nestline = element_line(size = 0.35),
+        legend.position = "none", 
+        strip.text.x = element_text(color = "black", size=12),
+        strip.text.y = element_text(color = "black", size=12, angle = 0),
+        strip.background = element_blank(),
+        axis.ticks = element_line(color = "black", size = 0.3),
+        axis.title = element_text(color = "black", size=12),
+        axis.text = element_text(color = "black", size=9))
+
+Figure.6d <- 
+ggplot(CL.comp.data.forscatter.4, aes(x = Obs, y = Med))+
+  geom_abline(intercept = 0, slope = 1, linetype=2, size = 0.35)+
+  geom_abline(intercept = 1, slope = 1, linetype=2, size = 0.35, color = "lightgray")+
+  geom_abline(intercept = -1, slope = 1, linetype=2, size = 0.35, color = "lightgray")+
+  geom_ribbon(data=data2, aes(x=x,ymin=min,ymax=max),inherit.aes = FALSE, fill = "lightgray", alpha = 0.2) +
+  geom_errorbar(aes(ymin = LB, ymax = UB, color = PFAS), width = 0, size = 1) +
+  geom_errorbarh(aes(y = Med, xmin = Obs.min, xmax = Obs.max, color = PFAS), height = 0, size = 0.4) +
+  #geom_errorbarh(aes(y = Med, xmin = Obs.5pert, xmax = Obs.95pert, color = PFAS), height = 0, size = 0.7) +
+  geom_errorbarh(aes(y = Med, xmin = Obs.LB, xmax = Obs.UB, color = PFAS), height = 0, size = 1) +
+  geom_point(aes(shape = Exposure, fill=PFAS),color = "black", size = 2.5) +
+  xlab("Reported renal clearance (mL/Kg per day)") +
+  ylab("") +
+  ggtitle("D. PhysioMimix")+
+  scale_shape_manual(values = c(21, 24))+
+  scale_color_manual(values = c("#167CF2","#6FCC33","#F28E16"))+ 
+  scale_fill_manual(values = c("#167CF2","#6FCC33","#F28E16"))+
+  guides(color = FALSE, fill = FALSE) +
+  coord_cartesian(xlim = c(1E-4, 2E+3), ylim = c(1E-4, 2E+3))+
+  scale_x_log10(expand = c(0,0),
+                breaks = trans_breaks("log10", function(x) 10^x, n = 6),
+                labels = trans_format("log10", math_format(10^.x))) +
+  scale_y_log10(expand = c(0,0),
+                breaks = trans_breaks("log10", function(x) 10^x, n = 6),
+                labels = trans_format("log10", math_format(10^.x))) +
+  theme_bw() +
+  theme(text=element_text(family="sans", face="plain", color="#000000", size=12),
+        title = element_text(color = "black", size=12),
+        plot.title = element_text(color = "black", face = "bold", size=14),
+        panel.grid = element_blank(),
+        panel.border = element_rect(size = 0.6),
+        ggh4x.facet.nestline = element_line(size = 0.35),
+        legend.position = "none", 
+        strip.text.x = element_text(color = "black", size=12),
+        strip.text.y = element_text(color = "black", size=12, angle = 0),
+        strip.background = element_blank(),
+        axis.ticks = element_line(color = "black", size = 0.3),
+        axis.title = element_text(color = "black", size=12),
+        axis.text = element_text(color = "black", size=9))
+
+pdf(width = 8, height = 8.5, "plots/Figure 6.pdf")
+Figure.6a + Figure.6b + Figure.6c + Figure.6d + plot_layout( heights = c(1/2, 1/2), widths = c(1/2, 1/2))
+dev.off()
+
+```
+
+
+```{r Comparing cell concnetrations among different in vitro systems (Figure S5)}
+cell.conc.allcomp <- read.csv("data/cell.conc.allcomp.csv")
+cell.conc.allcomp$PFAS <- factor(cell.conc.allcomp$PFAS, levels = c("PFOS", "PFHxA", "PFBS"))
+cell.conc.allcomp$expo <- factor(cell.conc.allcomp$expo, levels = c("Single", "Mixture"))
+cell.conc.allcomp$chip <- factor(cell.conc.allcomp$chip, levels = c("2D", "Static (A to B)", "Fludic (A to B)", "Static (B to A)", "Fludic (B to A)"))
+
+
+pdf(width = 10, height = 4.5, "plots/Figure S5.pdf")
+ggplot(cell.conc.allcomp, aes(x=expo, y=log10(mean)))+
+  geom_errorbar(aes(ymin=log10(mean-sd), ymax=log10(mean+sd), group=chip), position = position_dodge(0.6), width=0.5, size=0.7)+
+  geom_point(aes(fill=chip, shape=chip), position = position_dodge(0.6), size=2.5)+
+  facet_wrap(PFAS~.)+
+  labs(x = "PFAS", 
+       y= "Concentration (uM)")+
+  scale_y_continuous(lim = c(0,5),
+                     breaks = c(0,1,2,3,4,5),
+                     labels = trans_format("log10", math_format(10^.x))(c(1, 10, 100, 1000, 10000, 100000))) +
+  scale_fill_manual(values = c("#7D7C7C", "#E55604", "#26577C", "#E55604", "#26577C")) +
+  scale_shape_manual(values = c(21, 24, 24, 25, 25))+
+  theme_bw() + 
+  theme(text=element_text(family="sans", face="plain", color="#000000", size=12),
+        title = element_text(color = "black", size=12),
+        plot.title = element_text(face = "bold"),
+        panel.grid = element_blank(),
+        panel.border = element_rect(size = 1.2),
+        legend.position = c(0.85, 0.8), #c(0.85, 0.8)"none"
+        legend.title = element_blank(),
+        legend.text = element_text(color = "black", size=10),
+        legend.background = element_blank(),
+        strip.text = element_text(color = "black", face = "bold", size=12),
+        strip.background = element_blank(),
+        axis.ticks = element_line(color = "black"),
+        axis.title = element_text(color = "black", size=12),
+        axis.text.y = element_text(color = "black", size=10),
+        axis.text.x = element_text(color = "black", size=10))
+dev.off()
+```
+
+
+```{r Statistical analysis for flux (Source of Table S4)}
+net_flux_raw <- read.csv("data/net_flux_raw.csv")
+net_flux_raw$assay <- factor(net_flux_raw$assay, levels = c("Static", "Fluidic"))
+net_flux_raw$expo <- factor(net_flux_raw$expo, levels = c("Single", "Mixture"))
+
+net_flux_raw.pfos <- net_flux_raw[which(net_flux_raw$PFAS == "PFOS"),]
+TukeyHSD(aov(lm(data=net_flux_raw.pfos[which(net_flux_raw.pfos$Time == 2),], value ~ assay + expo + assay*expo)))
+TukeyHSD(aov(lm(data=net_flux_raw.pfos[which(net_flux_raw.pfos$Time == 4),], value ~ assay + expo + assay*expo)))
+TukeyHSD(aov(lm(data=net_flux_raw.pfos[which(net_flux_raw.pfos$Time == 24),], value ~ assay + expo + assay*expo)))
+TukeyHSD(aov(lm(data=net_flux_raw.pfos[which(net_flux_raw.pfos$Time == 48),], value ~ assay + expo + assay*expo)))
+
+
+net_flux_raw.pfbs <- net_flux_raw[which(net_flux_raw$PFAS == "PFBS"),]
+TukeyHSD(aov(lm(data=net_flux_raw.pfbs[which(net_flux_raw.pfbs$Time == 2),], value ~ assay)))
+TukeyHSD(aov(lm(data=net_flux_raw.pfbs[which(net_flux_raw.pfbs$Time == 4),], value ~ assay)))
+TukeyHSD(aov(lm(data=net_flux_raw.pfbs[which(net_flux_raw.pfbs$Time == 24),], value ~ assay + expo + assay*expo)))
+TukeyHSD(aov(lm(data=net_flux_raw.pfbs[which(net_flux_raw.pfbs$Time == 48),], value ~ assay + expo + assay*expo)))
+
+
+net_flux_raw.pfhxa <- net_flux_raw[which(net_flux_raw$PFAS == "PFHxA"),]
+TukeyHSD(aov(lm(data=net_flux_raw.pfhxa[which(net_flux_raw.pfhxa$Time == 2),], value ~ assay + expo + assay*expo)))
+TukeyHSD(aov(lm(data=net_flux_raw.pfhxa[which(net_flux_raw.pfhxa$Time == 4),], value ~ assay + expo + assay*expo)))
+TukeyHSD(aov(lm(data=net_flux_raw.pfhxa[which(net_flux_raw.pfhxa$Time == 24),], value ~ assay + expo + assay*expo)))
+TukeyHSD(aov(lm(data=net_flux_raw.pfhxa[which(net_flux_raw.pfhxa$Time == 48),], value ~ assay + expo + assay*expo)))
+
+```
